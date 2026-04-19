@@ -2,7 +2,7 @@
 
 CLI, игровой цикл, валидаторы hard-constraints, персистентность и
 единственный "голос" системы перед игроком. Часть мульти-агентной
-системы [worldsim](https://github.com/b3axap/worldsim-workspace).
+системы [worldsim](https://github.com/worldsim-rpg/worldsim-workspace).
 
 ## Роль
 
