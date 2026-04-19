@@ -1,0 +1,36 @@
+# Template: kлади в .github/workflows/sync-check.yml каждого агент-репо.
+#
+# Клонирует workspace рядом и запускает sync-check.sh --local в текущем
+# репо. Фейлит мерж, если _schemas/ или _prompts/ разошлись с каноном.
+#
+# Требует secret/var WORLDSIM_WORKSPACE_REF (по умолчанию main).
+
+name: sync-check
+
+on:
+  pull_request:
+    paths:
+      - "_schemas/**"
+      - "_prompts/**"
+  push:
+    branches: [main]
+
+jobs:
+  sync-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout agent repo
+        uses: actions/checkout@v4
+        with:
+          path: agent
+
+      - name: Checkout workspace
+        uses: actions/checkout@v4
+        with:
+          repository: worldsim-rpg/worldsim-workspace
+          ref: ${{ vars.WORLDSIM_WORKSPACE_REF || 'main' }}
+          path: workspace
+
+      - name: Run sync-check against this repo
+        working-directory: agent
+        run: bash ../workspace/repo-setup/sync-check.sh --local

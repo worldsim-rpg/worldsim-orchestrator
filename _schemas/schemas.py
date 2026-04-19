@@ -167,6 +167,15 @@ class WorldMeta(BaseModel):
     premise: str
     tick: int = 0
     player_character_id: str = "pc"
+    schema_version: str = Field(
+        default="0.0.0",
+        description=(
+            "Версия канона, под которую сохранён этот мир. "
+            "'0.0.0' означает pre-versioning сейв — persistence.py "
+            "перештампует его при следующем save. Проверка совместимости "
+            "— worldsim_schemas.is_compatible(...)."
+        ),
+    )
 
 
 class PlotState(BaseModel):

@@ -39,7 +39,14 @@
 
 ## Правило при добавлении нового агента
 
+См. `worldsim-workspace/docs/agent-contract.md`. Кратко:
+
 1. `cd ../worldsim-workspace && ./repo-setup/generate-scaffold.sh <name> <pkg> "<desc>"`.
-2. Добавить агента в `loop.py` (где именно вызывать).
-3. Добавить его в `pyproject.toml` orchestrator в dependencies (когда он
-   опубликуется как pip-пакет) или `pip install -e` локально.
+2. Добавить `MANIFEST` (или `MANIFESTS`) в `__init__.py` нового пакета.
+3. Добавить секцию `[[agents]]` в `worldsim-workspace/agents.toml`.
+4. Добавить имя в `worldsim-workspace/repo-setup/agents.txt` + `sync-all.sh`.
+5. В orchestrator: `pip install -e` локально, либо добавить в `pyproject.toml`.
+6. `python -m pytest tests/test_registry.py` — должен пройти.
+
+**`loop.py` НЕ меняется.** Если понадобилось — скорее всего вводится
+новая фаза в `AgentPhase`, обсуждается отдельным ADR.

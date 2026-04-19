@@ -1,39 +1,25 @@
 """
 Оркестровка одного хода. Последовательность согласно docs/loop.md.
 
+Вызовы LLM-агентов идут через registry (worldsim-workspace/agents.toml) —
+loop.py не знает имён конкретных пакетов. Добавление нового агента =
+правка agents.toml, без изменений здесь.
+
 Хода нет без LLM-клиента, поэтому если ANTHROPIC_API_KEY не задан —
 функции падают на этапе инициализации клиента.
-
-NB: агенты (worldsim-*-agent) импортируются лениво. Если какого-то из
-них ещё нет в окружении — orchestrator упадёт с понятной ошибкой и
-укажет на docs/setup.md.
 """
 
 from __future__ import annotations
 
 from worldsim_prompts import AnthropicClient
-from worldsim_schemas import Intent, TurnPatch
+from worldsim_schemas import AgentPhase, TurnPatch
 
-from .context import TurnContext, build_turn_context
+from .context import build_turn_context
 from .intent import parse_intent
 from .persistence import WorldSnapshot, append_session_log, apply_turn, save_world
+from .registry import Registry, load_registry
 from .renderer import print_error, print_info, print_scene
 from .validators import validate_intent
-
-
-class AgentUnavailable(RuntimeError):
-    """Поднимается если нужный агент-пакет не установлен."""
-
-
-def _import_agent(module: str, fn: str = "run"):
-    try:
-        mod = __import__(module, fromlist=[fn])
-    except ImportError as e:
-        raise AgentUnavailable(
-            f"Агент-пакет «{module}» не установлен. См. "
-            f"worldsim-workspace/docs/setup.md"
-        ) from e
-    return getattr(mod, fn)
 
 
 def run_turn(
@@ -41,21 +27,21 @@ def run_turn(
     player_input: str,
     *,
     client: AnthropicClient,
+    registry: Registry | None = None,
 ) -> str:
     """
     Исполняет один ход. Возвращает текст сцены для игрока. Мутирует
     snapshot и пишет на диск (timeline, session_log, save).
     """
 
+    reg = registry or load_registry()
     settings = snapshot.settings
-    model_default = settings.model_default
-    model_heavy = settings.model_heavy
 
     # 1. Контекст
     ctx = build_turn_context(snapshot)
 
-    # 2. Intent (LLM)
-    intent = parse_intent(player_input, ctx, client=client, model=model_default)
+    # 2. Intent (LLM, не агент)
+    intent = parse_intent(player_input, ctx, client=client, model=settings.model_default)
 
     # 3. Hard-constraints
     entities = {
@@ -83,32 +69,36 @@ def run_turn(
         )
         return ""
 
-    # 4. npc-mind (если применимо)
+    # 4. npc-mind (опционально, только для converse с NPC)
     npc_response = None
     if intent.intent == "converse" and intent.target and intent.target in snapshot.characters:
         npc = snapshot.characters[intent.target]
-        npc_mind_run = _import_agent("worldsim_npc_mind")
-        npc_response = npc_mind_run(
-            {"npc": npc.model_dump(), "intent": intent.model_dump(), "context": ctx.to_dict()},
+        npc_response = reg.call(
+            AgentPhase.NPC_RESPOND,
+            {
+                "npc": npc.model_dump(),
+                "intent": intent.model_dump(),
+                "context": ctx.to_dict(),
+            },
             client=client,
-            model=model_default,
+            settings=settings,
         )
 
-    # 5. world-builder.turn_update
-    world_builder_turn = _import_agent("worldsim_world_builder", "run_turn_update")
-    world_patch: TurnPatch = world_builder_turn(
+    # 5. world_update
+    world_patch: TurnPatch = reg.call(
+        AgentPhase.WORLD_UPDATE,
         {
             "intent": intent.model_dump(),
             "npc_response": npc_response,
             "context": ctx.to_dict(),
         },
         client=client,
-        model=model_heavy,
+        settings=settings,
     )
 
-    # 6. personal-progression.update
-    progression_run = _import_agent("worldsim_personal_progression")
-    progression_patch: TurnPatch = progression_run(
+    # 6. progression_update
+    progression_patch: TurnPatch = reg.call(
+        AgentPhase.PROGRESSION_UPDATE,
         {
             "intent": intent.model_dump(),
             "world_patch": world_patch.model_dump(),
@@ -116,18 +106,18 @@ def run_turn(
             "context": ctx.to_dict(),
         },
         client=client,
-        model=model_default,
+        settings=settings,
     )
 
-    # 7. canon-keeper.validate
-    canon_validate = _import_agent("worldsim_canon_keeper", "validate")
-    validation = canon_validate(
+    # 7. canon_validate
+    validation = reg.call(
+        AgentPhase.CANON_VALIDATE,
         {
             "patches": [*world_patch.world_changes, *progression_patch.world_changes],
             "snapshot": _snapshot_summary(snapshot),
         },
         client=client,
-        model=model_heavy,
+        settings=settings,
     )
     if not validation.get("ok"):
         print_error(
@@ -147,16 +137,16 @@ def run_turn(
     apply_turn(snapshot, combined)
     save_world(snapshot)
 
-    # 9. scene-master.render
-    scene_run = _import_agent("worldsim_scene_master")
+    # 9. scene_render
     new_ctx = build_turn_context(snapshot)
-    scene_text: str = scene_run(
+    scene_text: str = reg.call(
+        AgentPhase.SCENE_RENDER,
         {
             "context": new_ctx.to_dict(),
             "last_action_summary": combined.narrative_summary,
         },
         client=client,
-        model=model_default,
+        settings=settings,
     )
 
     # 10. Session log
@@ -188,15 +178,21 @@ def _snapshot_summary(snapshot: WorldSnapshot) -> dict:
     }
 
 
-def show_welcome_scene(snapshot: WorldSnapshot, *, client: AnthropicClient) -> None:
+def show_welcome_scene(
+    snapshot: WorldSnapshot,
+    *,
+    client: AnthropicClient,
+    registry: Registry | None = None,
+) -> None:
     """Печатает стартовую сцену нового мира."""
 
-    scene_run = _import_agent("worldsim_scene_master")
+    reg = registry or load_registry()
     ctx = build_turn_context(snapshot)
-    scene_text: str = scene_run(
+    scene_text: str = reg.call(
+        AgentPhase.SCENE_RENDER,
         {"context": ctx.to_dict(), "last_action_summary": None, "opening": True},
         client=client,
-        model=snapshot.settings.model_default,
+        settings=snapshot.settings,
     )
     print_scene(scene_text, header=f"{snapshot.meta.title} — начало")
     print_info(f"Мир «{snapshot.meta.id}» создан. Вводи действия свободным текстом.")

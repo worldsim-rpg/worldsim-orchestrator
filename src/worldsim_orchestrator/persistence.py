@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from worldsim_schemas import (
+    SCHEMA_VERSION,
     Arc,
     Character,
     Faction,
@@ -30,7 +31,12 @@ from worldsim_schemas import (
     TimelineEvent,
     TurnPatch,
     WorldMeta,
+    is_compatible,
 )
+
+
+class SchemaVersionMismatch(RuntimeError):
+    """Сейв несовместим с текущей MAJOR-версией канона."""
 
 
 # --- модель сейва на диске -----------------------------------------------
@@ -96,6 +102,10 @@ def _load_list(data: list[dict], model: type[BaseModel]) -> dict[str, Any]:
 
 
 def save_world(snapshot: WorldSnapshot) -> None:
+    # Каждое сохранение штампует текущую версию схем. Так pre-versioning
+    # сейвы (schema_version="0.0.0") автоматически мигрируют на 0.1.0
+    # при следующем save.
+    snapshot.meta.schema_version = SCHEMA_VERSION
     d = world_dir(snapshot.meta.id)
     _write_json(d / "world_meta.json", snapshot.meta.model_dump())
     _write_json(d / "game_settings.json", snapshot.settings.model_dump())
@@ -117,8 +127,18 @@ def load_world(world_id: str) -> WorldSnapshot:
     if not d.exists():
         raise FileNotFoundError(f"Мир «{world_id}» не найден в {saves_root()}")
 
+    meta = WorldMeta.model_validate(_read_json(d / "world_meta.json"))
+    # Pre-versioning сейвы имеют "0.0.0" — грузим молча, перештампуется
+    # при следующем save. Иначе требуем совпадение MAJOR.
+    if meta.schema_version != "0.0.0" and not is_compatible(meta.schema_version):
+        raise SchemaVersionMismatch(
+            f"Сейв «{world_id}» сохранён под версией канона "
+            f"{meta.schema_version}, текущая {SCHEMA_VERSION}. "
+            f"Нужна миграция — см. worldsim-workspace/packages/schemas/migrations/."
+        )
+
     return WorldSnapshot(
-        meta=WorldMeta.model_validate(_read_json(d / "world_meta.json")),
+        meta=meta,
         settings=GameSettings.model_validate(_read_json(d / "game_settings.json")),
         locations=_load_list(_read_json(d / "locations.json"), Location),
         characters=_load_list(_read_json(d / "characters.json"), Character),
@@ -130,6 +150,14 @@ def load_world(world_id: str) -> WorldSnapshot:
             _read_json(d / "player_progression.json")
         ),
     )
+
+
+def saved_schema_version(world_id: str) -> str | None:
+    """Возвращает schema_version сейва без загрузки всего мира."""
+    meta_file = world_dir(world_id) / "world_meta.json"
+    if not meta_file.exists():
+        return None
+    return _read_json(meta_file).get("schema_version", "0.0.0")
 
 
 def list_worlds() -> list[dict[str, str]]:

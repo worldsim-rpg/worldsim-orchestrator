@@ -1,5 +1,7 @@
 """Общие pydantic-схемы канона worldsim."""
 
+from .agent_contract import AgentManifest, AgentPhase, AgentRegistryFile, ModelTier
+from .version import SCHEMA_VERSION, is_compatible, major
 from .schemas import (
     Arc,
     ArcStage,
@@ -22,6 +24,13 @@ from .schemas import (
 )
 
 __all__ = [
+    "SCHEMA_VERSION",
+    "is_compatible",
+    "major",
+    "AgentManifest",
+    "AgentPhase",
+    "AgentRegistryFile",
+    "ModelTier",
     "Arc",
     "ArcStage",
     "Attributes",
