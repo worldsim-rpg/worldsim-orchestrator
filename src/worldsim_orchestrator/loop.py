@@ -19,6 +19,7 @@ from .intent import parse_intent
 from .persistence import WorldSnapshot, append_session_log, apply_turn, save_world
 from .renderer import print_error, print_info, print_scene
 from .validators import validate_intent
+from .acquisition_renderer import render_acquisition_plan
 
 
 class AgentUnavailable(RuntimeError):
@@ -83,7 +84,11 @@ def run_turn(
         )
         return ""
 
-    # 4. npc-mind (если применимо)
+    # 4. Особая ветка: планирование приобретения возможности
+    if intent.intent == "acquire_capability":
+        return _run_acquisition_turn(snapshot, intent, ctx, player_input, client=client)
+
+    # 5. npc-mind (если применимо)
     npc_response = None
     if intent.intent == "converse" and intent.target and intent.target in snapshot.characters:
         npc = snapshot.characters[intent.target]
@@ -94,7 +99,7 @@ def run_turn(
             model=model_default,
         )
 
-    # 5. world-builder.turn_update
+    # 6. world-builder.turn_update
     world_builder_turn = _import_agent("worldsim_world_builder", "run_turn_update")
     world_patch: TurnPatch = world_builder_turn(
         {
@@ -106,7 +111,7 @@ def run_turn(
         model=model_heavy,
     )
 
-    # 6. personal-progression.update
+    # 7. personal-progression.update
     progression_run = _import_agent("worldsim_personal_progression")
     progression_patch: TurnPatch = progression_run(
         {
@@ -119,7 +124,7 @@ def run_turn(
         model=model_default,
     )
 
-    # 7. canon-keeper.validate
+    # 8. canon-keeper.validate
     canon_validate = _import_agent("worldsim_canon_keeper", "validate")
     validation = canon_validate(
         {
@@ -136,7 +141,7 @@ def run_turn(
         )
         return ""
 
-    # 8. Применяем оба TurnPatch
+    # 9. Применяем оба TurnPatch
     snapshot.meta.tick += 1
     combined = TurnPatch(
         world_changes=[*world_patch.world_changes, *progression_patch.world_changes],
@@ -147,7 +152,7 @@ def run_turn(
     apply_turn(snapshot, combined)
     save_world(snapshot)
 
-    # 9. scene-master.render
+    # 10. scene-master.render
     scene_run = _import_agent("worldsim_scene_master")
     new_ctx = build_turn_context(snapshot)
     scene_text: str = scene_run(
@@ -159,7 +164,7 @@ def run_turn(
         model=model_default,
     )
 
-    # 10. Session log
+    # 11. Session log
     append_session_log(
         snapshot.meta.id,
         {
@@ -169,6 +174,56 @@ def run_turn(
             "patches": [p.model_dump() for p in combined.world_changes],
             "new_facts": combined.new_facts,
             "rendered_scene": scene_text,
+        },
+    )
+
+    return scene_text
+
+
+def _run_acquisition_turn(
+    snapshot: WorldSnapshot,
+    intent: Intent,
+    ctx: TurnContext,
+    player_input: str,
+    *,
+    client: AnthropicClient,
+) -> str:
+    """
+    Ветка планирования приобретения возможности.
+
+    Не изменяет канон — возвращает план испытаний игроку. Запись в
+    session_log для истории. Мир не меняется до завершения испытаний.
+    """
+    settings = snapshot.settings
+
+    # Описание цели: target_raw (если есть) иначе raw_text.
+    # Тип: из method (intent_parser должен заполнить), иначе "general".
+    acquisition_request = {
+        "description": intent.target_raw or intent.raw_text,
+        "type": intent.method or "general",
+        "preferred_vector": None,
+    }
+
+    plan_fn = _import_agent("worldsim_personal_progression", "plan_acquisition")
+    plan = plan_fn(
+        {
+            "acquisition_request": acquisition_request,
+            "player_progression": snapshot.player_progression.model_dump(),
+            "context": ctx.to_dict(),
+        },
+        client=client,
+        model=settings.model_heavy,
+    )
+
+    scene_text = render_acquisition_plan(plan)
+
+    append_session_log(
+        snapshot.meta.id,
+        {
+            "tick": snapshot.meta.tick,
+            "player_input": player_input,
+            "intent": intent.model_dump(),
+            "acquisition_plan": plan.model_dump(),
         },
     )
 

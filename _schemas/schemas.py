@@ -128,6 +128,27 @@ class Attributes(BaseModel):
     subterfuge: int = 1
 
 
+class VectorType(str, Enum):
+    """Канал, через который персонаж движется к цели."""
+
+    INFORMATION = "information"   # знания, данные, секреты
+    PROPERTY = "property"         # предметы, ресурсы, активы
+    SKILLS = "skills"             # умения, техники, опыт
+    CONNECTIONS = "connections"   # люди, доступы, покровители
+
+
+class Capability(BaseModel):
+    """Возможность, которой владеет персонаж — итог завершённого пути."""
+
+    id: str
+    description: str
+    type: str                                                        # доменный тип (combat, magic, social, …)
+    vector: VectorType
+    world_impact: float = Field(default=0.0, ge=0.0, le=100.0)
+    persona_impact: float = Field(default=0.0, ge=0.0, le=100.0)
+    acquired_at_tick: int = 0
+
+
 class PlayerProgression(BaseModel):
     character_id: str = "pc"
     attributes: Attributes = Field(default_factory=Attributes)
@@ -139,6 +160,128 @@ class PlayerProgression(BaseModel):
     inventory: list[str] = Field(default_factory=list)
     flags: list[str] = Field(default_factory=list)
     condition: Condition = Condition.OK
+    capabilities: list[Capability] = Field(default_factory=list)
+
+
+# --- планирование приобретения возможностей (v0.4-rev) -------------------
+
+
+class AcquisitionRequest(BaseModel):
+    """Что персонаж хочет приобрести. Минимальный ввод от оркестратора."""
+
+    description: str
+    type: str                               # доменный тип: combat, magic, social, …
+    preferred_vector: VectorType | None = None
+
+
+class FeasibilityComponents(BaseModel):
+    """Шаг 2: три компонента выполнимости [0..1]."""
+
+    channel_access: float = Field(ge=0.0, le=1.0)
+    resource_readiness: float = Field(ge=0.0, le=1.0)
+    world_permission: float = Field(ge=0.0, le=1.0)
+
+
+class ImpactEstimate(BaseModel):
+    """Шаг 3: влияние на мир и персонажа [0..100] каждое."""
+
+    world_impact: float = Field(ge=0.0, le=100.0)
+    persona_impact: float = Field(ge=0.0, le=100.0)
+
+
+class UniquenessComponents(BaseModel):
+    """Шаг 5: три компонента уникальности сценария [0..1]."""
+
+    path_rarity: float = Field(ge=0.0, le=1.0)
+    persona_fit: float = Field(ge=0.0, le=1.0)
+    condition_rarity: float = Field(ge=0.0, le=1.0)
+
+
+class ConflictInfo(BaseModel):
+    """Шаг 8: информация о конфликтах с имеющимися возможностями."""
+
+    conflicting_capability_ids: list[str] = Field(default_factory=list)
+    conflict_types_affected: int = Field(default=0, ge=0, le=4)
+    alternative_vectors: list[VectorType] = Field(default_factory=list)
+
+
+class AcquisitionEval(BaseModel):
+    """
+    Полная оценка LLM для шагов 2–5, 8.
+
+    LLM выставляет все числовые оценки; движок (acquisition_engine.py)
+    применяет к ним формулы из схемы v0.4-rev.
+    """
+
+    # Шаг 1: метрики цели (LLM выводит из description + context)
+    universality: float = Field(ge=0.0, le=100.0)
+    prevalence: float = Field(ge=0.0, le=100.0)
+    divergence: float = Field(ge=0.0, le=100.0)
+    favorable_factors: float = Field(ge=0.0, le=100.0)
+
+    # Шаги 2–5, 8
+    chosen_vector: VectorType
+    feasibility: FeasibilityComponents
+    impact: ImpactEstimate
+    uniqueness: UniquenessComponents
+    conflicts: ConflictInfo
+    blocking_factor: str | None = None
+
+
+class FeasibilityStatus(str, Enum):
+    FULL = "full"
+    PARTIAL = "partial"
+    BLOCKED = "blocked"
+
+
+class ConflictStatus(str, Enum):
+    CLEAN = "clean"
+    ALTERNATIVE_ROUTE = "alternative_route"
+    PARTIAL_CONFLICT = "partial_conflict"
+    FULL_CONFLICT_PENDING = "full_conflict_pending"
+    IMPOSSIBLE = "impossible"
+
+
+class Trial(BaseModel):
+    """Атомарное испытание внутри маршрута."""
+
+    id: str
+    description: str
+    difficulty: float = Field(ge=0.0, le=100.0)
+    error_chance: float = Field(ge=0.0, le=1.0)
+    error_cost: float = Field(ge=0.0, le=100.0)
+    irreversibility: float | None = Field(default=None, ge=0.0, le=1.0)
+    accumulation: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class CapabilityRoute(BaseModel):
+    """Один маршрут с плоским списком испытаний."""
+
+    vector: VectorType
+    trials: list[Trial]
+    total_difficulty: float
+    inflation_factor: float   # сумма сложностей испытаний / difficulty_target
+
+
+class AcquisitionPlan(BaseModel):
+    """Полный план приобретения возможности — результат plan_acquisition()."""
+
+    routes: list[CapabilityRoute]
+    value: float = Field(ge=0.0, le=100.0)
+    value_core: float
+    value_bonus: float
+    difficulty_target: float = Field(ge=0.0, le=100.0)
+    type_saturation_penalty: float
+    vector: VectorType
+    world_impact: float
+    persona_impact: float
+    scenario_uniqueness: float = Field(ge=0.0, le=1.0)
+    feasibility_status: FeasibilityStatus
+    feasibility_score: float
+    partial_coverage: bool
+    conflict_status: ConflictStatus
+    conflicting_capability_ids: list[str] = Field(default_factory=list)
+    blocking_factor: str | None = None
 
 
 # --- мета мира и настройки ------------------------------------------------
