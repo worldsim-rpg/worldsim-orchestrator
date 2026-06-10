@@ -160,6 +160,40 @@ def saved_schema_version(world_id: str) -> str | None:
     return _read_json(meta_file).get("schema_version", "0.0.0")
 
 
+def save_initial_snapshot(snapshot: WorldSnapshot) -> None:
+    """Сохраняет снапшот tick=0 как точку для /restart. Вызывается один раз при создании."""
+    d = world_dir(snapshot.meta.id) / "initial"
+    _write_json(d / "world_meta.json", snapshot.meta.model_dump())
+    _write_json(d / "game_settings.json", snapshot.settings.model_dump())
+    _write_json(d / "locations.json", _dump_list(snapshot.locations))
+    _write_json(d / "characters.json", _dump_list(snapshot.characters))
+    _write_json(d / "factions.json", _dump_list(snapshot.factions))
+    _write_json(d / "secrets.json", _dump_list(snapshot.secrets))
+    _write_json(d / "arcs.json", _dump_list(snapshot.arcs))
+    _write_json(d / "plot_state.json", snapshot.plot_state.model_dump())
+    _write_json(d / "player_progression.json", snapshot.player_progression.model_dump())
+
+
+def load_initial_snapshot(world_id: str) -> WorldSnapshot | None:
+    """Загружает начальный снапшот для /restart. None если не сохранён."""
+    d = world_dir(world_id) / "initial"
+    if not d.exists():
+        return None
+    return WorldSnapshot(
+        meta=WorldMeta.model_validate(_read_json(d / "world_meta.json")),
+        settings=GameSettings.model_validate(_read_json(d / "game_settings.json")),
+        locations=_load_list(_read_json(d / "locations.json"), Location),
+        characters=_load_list(_read_json(d / "characters.json"), Character),
+        factions=_load_list(_read_json(d / "factions.json"), Faction),
+        secrets=_load_list(_read_json(d / "secrets.json"), Secret),
+        arcs=_load_list(_read_json(d / "arcs.json"), Arc),
+        plot_state=PlotState.model_validate(_read_json(d / "plot_state.json")),
+        player_progression=PlayerProgression.model_validate(
+            _read_json(d / "player_progression.json")
+        ),
+    )
+
+
 def list_worlds() -> list[dict[str, str]]:
     root = saves_root()
     out = []
@@ -213,33 +247,49 @@ def _resolve_target(snapshot: WorldSnapshot, p: PatchOp) -> BaseModel:
 
 
 def _set_field(obj: BaseModel, field_path: str, op: str, value: Any) -> None:
-    """Поддерживает dot-пути: 'attributes.perception'."""
+    """Поддерживает dot-пути: 'attributes.perception', 'skill_counters.empathy_uses'."""
 
     parts = field_path.split(".")
     *head, last = parts
 
-    # Спуск по вложенности
     cur: Any = obj
     for part in head:
-        cur = getattr(cur, part)
+        cur = cur[part] if isinstance(cur, dict) else getattr(cur, part)
 
-    if op == "set":
-        setattr(cur, last, value)
-    elif op == "inc":
-        setattr(cur, last, getattr(cur, last) + value)
-    elif op == "append":
-        current_list = getattr(cur, last)
-        if not isinstance(current_list, list):
-            raise TypeError(f"append в поле не-список: {field_path}")
-        current_list.append(value)
-    elif op == "remove":
-        current_list = getattr(cur, last)
-        if not isinstance(current_list, list):
-            raise TypeError(f"remove в поле не-список: {field_path}")
-        if value in current_list:
-            current_list.remove(value)
+    if isinstance(cur, dict):
+        if op == "set":
+            cur[last] = value
+        elif op == "inc":
+            cur[last] = cur.get(last, 0) + value
+        elif op == "append":
+            if not isinstance(cur.get(last), list):
+                raise TypeError(f"append в поле не-список: {field_path}")
+            cur[last].append(value)
+        elif op == "remove":
+            if not isinstance(cur.get(last), list):
+                raise TypeError(f"remove в поле не-список: {field_path}")
+            if value in cur[last]:
+                cur[last].remove(value)
+        else:
+            raise ValueError(f"Неизвестная операция: {op}")
     else:
-        raise ValueError(f"Неизвестная операция: {op}")
+        if op == "set":
+            setattr(cur, last, value)
+        elif op == "inc":
+            setattr(cur, last, getattr(cur, last) + value)
+        elif op == "append":
+            current_list = getattr(cur, last)
+            if not isinstance(current_list, list):
+                raise TypeError(f"append в поле не-список: {field_path}")
+            current_list.append(value)
+        elif op == "remove":
+            current_list = getattr(cur, last)
+            if not isinstance(current_list, list):
+                raise TypeError(f"remove в поле не-список: {field_path}")
+            if value in current_list:
+                current_list.remove(value)
+        else:
+            raise ValueError(f"Неизвестная операция: {op}")
 
 
 # --- timeline (append-only) ----------------------------------------------

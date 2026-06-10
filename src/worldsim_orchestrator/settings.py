@@ -1,6 +1,13 @@
 """
 GameSettings хранятся per-world. При `new` — спрашиваем игрока,
 записываем вместе с остальным каноном.
+
+Env vars:
+  WORLDSIM_LANG            — язык интерфейса (дефолт: ru)
+  WORLDSIM_MODEL           — модель по умолчанию (дефолт: claude-sonnet-4-6)
+  WORLDSIM_MODEL_HEAVY     — «тяжёлая» модель  (дефолт: claude-sonnet-4-6)
+  WORLDSIM_SAVES_DIR       — корень сейвов      (дефолт: saves/)
+  WORLDSIM_LOG_DIR         — корень логов       (дефолт: logs/ рядом с saves/)
 """
 
 from __future__ import annotations

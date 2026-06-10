@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
+from typing import Generator
 
 import typer
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from worldsim_prompts import AnthropicClient
@@ -14,12 +17,51 @@ from .loop import run_turn, show_welcome_scene
 from .persistence import (
     WorldSnapshot,
     list_worlds,
+    load_initial_snapshot,
     load_world,
     new_world_id,
+    save_initial_snapshot,
     save_world,
 )
 from .renderer import ask_player, console, print_error, print_info, print_scene, print_success
 from .settings import default_settings
+
+_AGENT_LABELS: dict[str, str] = {
+    "intent-parser":        "разбираю действие",
+    "npc-mind":             "думаю за NPC",
+    "world-builder":        "обновляю мир",
+    "personal-progression": "прогресс игрока",
+    "canon-keeper":         "проверяю канон",
+    "scene-master":         "рендерю сцену",
+}
+_TURN_STEPS = 5  # intent + world + progression + canon + scene (npc опционально)
+
+
+@contextmanager
+def _thinking(client: AnthropicClient) -> Generator[None, None, None]:
+    """Обёртка вокруг run_turn: прогресс-бар по шагам через перехват client.complete."""
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]{task.description}"),
+        BarColumn(bar_width=20),
+        TimeElapsedColumn(),
+        console=console,
+        transient=True,
+    ) as progress:
+        task = progress.add_task("думаю…", total=_TURN_STEPS)
+
+        original_complete = client.complete
+
+        def _tracked(**kwargs):  # type: ignore[no-untyped-def]
+            label = _AGENT_LABELS.get(client._log_agent or "", "думаю…")
+            progress.update(task, description=label, advance=1)
+            return original_complete(**kwargs)
+
+        client.complete = _tracked  # type: ignore[method-assign]
+        try:
+            yield
+        finally:
+            client.complete = original_complete  # type: ignore[method-assign]
 
 app = typer.Typer(help="worldsim — текстовая RPG с генерацией мира на лету.")
 
@@ -81,6 +123,7 @@ def new() -> None:
         print_info("Канон правит противоречия…")
 
     save_world(snapshot)
+    save_initial_snapshot(snapshot)
     print_success(f"Мир создан: {snapshot.meta.id} — «{snapshot.meta.title}»")
 
     show_welcome_scene(snapshot, client=client)
@@ -106,7 +149,8 @@ def play(world: str | None = typer.Option(None, "--world", help="ID мира")) 
         raise typer.Exit(1)
 
     client = AnthropicClient()
-    show_welcome_scene(snapshot, client=client)
+    with console.status("[dim]загружаем мир…[/]"):
+        show_welcome_scene(snapshot, client=client)
     _play_loop(snapshot, client)
 
 
@@ -140,7 +184,7 @@ def inspect(world: str = typer.Option(..., "--world", help="ID мира")) -> No
 
 
 def _play_loop(snapshot: WorldSnapshot, client: AnthropicClient) -> None:
-    print_info("Введи /quit чтобы выйти, /save чтобы сохраниться явно.")
+    print_info("Команды: /save — сохранить  /restart — начать сначала  /quit — выйти")
     while True:
         try:
             raw = ask_player()
@@ -153,14 +197,42 @@ def _play_loop(snapshot: WorldSnapshot, client: AnthropicClient) -> None:
             save_world(snapshot)
             print_info("Мир сохранён. До встречи.")
             return
+
         if raw == "/save":
             save_world(snapshot)
             print_success("Сохранено.")
             continue
+
+        if raw == "/restart":
+            initial = load_initial_snapshot(snapshot.meta.id)
+            if initial is None:
+                print_error("Начальный снапшот не найден — мир создан до версии с /restart.")
+                continue
+            confirm = ask_player("Начать сначала? Весь прогресс будет утерян [y/N]")
+            if confirm.strip().lower() != "y":
+                print_info("Отменено.")
+                continue
+            # Мутируем snapshot in-place чтобы не выходить из цикла
+            snapshot.meta = initial.meta
+            snapshot.settings = initial.settings
+            snapshot.locations = initial.locations
+            snapshot.characters = initial.characters
+            snapshot.factions = initial.factions
+            snapshot.secrets = initial.secrets
+            snapshot.arcs = initial.arcs
+            snapshot.plot_state = initial.plot_state
+            snapshot.player_progression = initial.player_progression
+            save_world(snapshot)
+            print_success("Мир сброшен до начала.")
+            with console.status("[dim]загружаем мир…[/]"):
+                show_welcome_scene(snapshot, client=client)
+            continue
+
         if not raw:
             continue
 
-        scene = run_turn(snapshot, raw, client=client)
+        with _thinking(client):
+            scene = run_turn(snapshot, raw, client=client)
         if scene:
             print_scene(scene)
 

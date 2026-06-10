@@ -16,6 +16,7 @@ from worldsim_schemas import AgentPhase, TurnPatch
 
 from .context import build_turn_context
 from .intent import parse_intent
+from .logger import append_dev_log, append_player_log
 from .persistence import WorldSnapshot, append_session_log, apply_turn, save_world
 from .registry import Registry, load_registry
 from .renderer import print_error, print_info, print_scene
@@ -36,11 +37,18 @@ def run_turn(
 
     reg = registry or load_registry()
     settings = snapshot.settings
+    world_id = snapshot.meta.id
+
+    # Подключаем dev-лог: один колбэк на весь ход.
+    if client._dev_log_callback is None:
+        client._dev_log_callback = lambda entry: append_dev_log(world_id, entry)
 
     # 1. Контекст
     ctx = build_turn_context(snapshot)
 
     # 2. Intent (LLM, не агент)
+    client._log_turn = snapshot.meta.tick
+    client._log_agent = "intent-parser"
     intent = parse_intent(player_input, ctx, client=client, model=settings.model_default)
 
     # 3. Hard-constraints
@@ -73,6 +81,7 @@ def run_turn(
     npc_response = None
     if intent.intent == "converse" and intent.target and intent.target in snapshot.characters:
         npc = snapshot.characters[intent.target]
+        client._log_agent = "npc-mind"
         npc_response = reg.call(
             AgentPhase.NPC_RESPOND,
             {
@@ -85,6 +94,7 @@ def run_turn(
         )
 
     # 5. world_update
+    client._log_agent = "world-builder"
     world_patch: TurnPatch = reg.call(
         AgentPhase.WORLD_UPDATE,
         {
@@ -97,6 +107,7 @@ def run_turn(
     )
 
     # 6. progression_update
+    client._log_agent = "personal-progression"
     progression_patch: TurnPatch = reg.call(
         AgentPhase.PROGRESSION_UPDATE,
         {
@@ -110,6 +121,7 @@ def run_turn(
     )
 
     # 7. canon_validate
+    client._log_agent = "canon-keeper"
     validation = reg.call(
         AgentPhase.CANON_VALIDATE,
         {
@@ -128,6 +140,7 @@ def run_turn(
 
     # 8. Применяем оба TurnPatch
     snapshot.meta.tick += 1
+    client._log_turn = snapshot.meta.tick
     combined = TurnPatch(
         world_changes=[*world_patch.world_changes, *progression_patch.world_changes],
         new_facts=[*world_patch.new_facts, *progression_patch.new_facts],
@@ -139,6 +152,7 @@ def run_turn(
 
     # 9. scene_render
     new_ctx = build_turn_context(snapshot)
+    client._log_agent = "scene-master"
     scene_text: str = reg.call(
         AgentPhase.SCENE_RENDER,
         {
@@ -148,6 +162,9 @@ def run_turn(
         client=client,
         settings=settings,
     )
+
+    # 9a. Player log
+    append_player_log(world_id, snapshot.meta.tick, player_input, scene_text)
 
     # 10. Session log
     append_session_log(

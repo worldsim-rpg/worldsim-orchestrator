@@ -9,3 +9,4 @@ build/
 .env
 saves/
 !saves/.gitkeep
+logs/
